@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New 능률보카 연습 웹사이트</title>
+    
+    <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-9003676993829716"
+         crossorigin="anonymous"></script>
+
+    <meta property="og:title" content="능률보카 연습">
+    <meta property="og:description" content="능률보카를 학습하고, 랭킹을 통해 친구들과 경쟁해보세요!">
+    <meta property="og:image" content="https://vocab-practice-1386e.web.app/preview.png">
+    <meta property="og:url" content="https://vocab-practice-1386e.web.app">
+    <meta property="og:type" content="website">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="능률보카 연습">
+    <meta name="twitter:description" content="능률보카 단어를 학습하고, 친구들과 경쟁해보세요!">
+    <meta name="twitter:image" content="https://vocab-practice-1386e.web.app/preview.png">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="vocabulary.js"></script>
+    <script type="module">
+        // Firebase SDK
+        import { initializeApp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp, addDoc, collection, getDocs, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-functions.js";
+
+        window.appContext = {
+            currentUserId: null,
+            currentUserName: null,
+            currentIncorrectWords: []
+        };
+
+        const firebaseConfigFromUser = {
+          apiKey: "AIzaSyCHr7gzgX81YeoCMKBdVkhrwPJFRmnw3Yo",
+          authDomain: "vocab-practice-1386e.firebaseapp.com",
+          projectId: "vocab-practice-1386e",
+          storageBucket: "vocab-practice-1386e.appspot.com",
+          messagingSenderId: "985016521498",
+          appId: "1:985016521498:web:51baf8fc15558c9ccf12a3",
+          measurementId: "G-8GCRDYHQM7"
+        };
+        
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : firebaseConfigFromUser;
+        const appId = firebaseConfig.appId;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // App Check debug token on localhost or ?debugAppCheck=1
+        try {
+        const urlHasDebug =
+            typeof window !== "undefined" &&
+            window.location &&
+            window.location.search.includes("debugAppCheck=1");
+        const isLocalhost =
+            typeof location !== "undefined" && location.hostname === "localhost";
+        if (isLocalhost || urlHasDebug) {
+            // eslint-disable-next-line no-undef
+            self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+            console.info("[appcheck] debug token enabled");
+        }
+        } catch (e) { /* no-op */ }
+        
+        const app = initializeApp(firebaseConfig);
+        import { initializeAppCheck, ReCaptchaV3Provider } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app-check.js";
+
+        const appCheck = initializeAppCheck(app, {
+          provider: new ReCaptchaV3Provider("6Ldku_YrAAAAAExpLjV_g26aCwJGTYmzBLzLWxRm"),
+          isTokenAutoRefreshEnabled: true,
+        });
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const functions = getFunctions(app, "us-central1");
+
+        // Auth helpers
+        function waitForAuthReady(authInstance) {
+          if (authInstance.currentUser) return Promise.resolve(authInstance.currentUser);
+          return new Promise((resolve) => {
+            const unsub = onAuthStateChanged(authInstance, (u) => {
+              unsub();
+              resolve(u || null);
+            });
+          });
+        }
+        async function ensureSignedIn(authInstance) {
+          let user = authInstance.currentUser || (await waitForAuthReady(authInstance));
+          if (!user) {
+            await signInAnonymously(authInstance);
+            user = await waitForAuthReady(authInstance);
+          }
+          // Refresh token to avoid 401
+          await user.getIdToken(true);
+          return user;
+        }
+
+        const incorrectWordsDocRef = () => {
+            if (!window.appContext.currentUserId) return null;
+            return doc(db, `artifacts/${appId}/users/${window.appContext.currentUserId}/incorrectVocabulary`, "userWords");
+        };
+        
+        window.firebaseInstances = { 
+            auth, 
+            db, 
+            getUserId: () => window.appContext.currentUserId,
+            getIncorrectWordsDocRef: incorrectWordsDocRef,
+            
+            loadIncorrectWordsFromFirestore: async () => {
+                if (!window.appContext.currentUserId) {
+                    window.appContext.currentIncorrectWords = [];
+                    if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+                        window.uiUpdateFunctions.refreshAppDisplay();
+                    }
+                    return;
+                }
+                const docRef = incorrectWordsDocRef();
+                if (!docRef) return;
+
+                onSnapshot(docRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        window.appContext.currentIncorrectWords = docSnap.data().words || [];
+                    } else {
+                        window.appContext.currentIncorrectWords = [];
+                    }
+                    if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+                        window.uiUpdateFunctions.refreshAppDisplay();
+                    }
+                }, (error) => {
+                    console.error("Error listening to incorrect words document:", error);
+                    window.appContext.currentIncorrectWords = [];
+                    if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+                        window.uiUpdateFunctions.refreshAppDisplay();
+                    }
+                });
+            },
+
+            saveIncorrectWordToFirestore: async (questionObject) => {
+                if (!window.appContext.currentUserId) return;
+                const docRef = incorrectWordsDocRef();
+                if (!docRef) return;
+                let currentWords = [...window.appContext.currentIncorrectWords];
+                const existingWordIndex = currentWords.findIndex(word => word.id === questionObject.id);
+                if (existingWordIndex === -1) { currentWords.push(questionObject); }
+                else { return; }
+                try { 
+                    await setDoc(docRef, { words: currentWords, lastUpdated: serverTimestamp() }); 
+                }
+                catch (error) { console.error("Error saving incorrect word:", error); }
+            },
+            
+            removeIncorrectWordFromFirestoreGlobally: async (questionId) => {
+                if (!window.appContext.currentUserId) return;
+                const docRef = incorrectWordsDocRef();
+                if (!docRef) return;
+                const updatedWords = window.appContext.currentIncorrectWords.filter(word => word.id !== questionId);
+                try { 
+                    await setDoc(docRef, { words: updatedWords, lastUpdated: serverTimestamp() });
+                }
+                catch (error) { console.error("Error removing incorrect word from Firestore:", error); }
+            },
+
+            saveAllDaysRankingToFirestore: async (userName, scoreInSession, questionsEngagedInSession, isPartialSession = false) => {
+                // Ensure the user is signed in before calling the server
+                let currentUserId = window.appContext.currentUserId;
+                try {
+                    const u = await ensureSignedIn(auth);
+                    currentUserId = u?.uid || null;
+                    window.appContext.currentUserId = currentUserId;
+                } catch (e) {
+                    console.warn("[auth] sign-in failed:", e);
+                    return { success: false, message: "로그인 실패로 기록할 수 없습니다." };
+                }
+                if (!currentUserId) {
+                    return { success: false, message: "로그인되지 않았습니다." };
+                }
+
+                const totalWordsInAllDaysMode = (window.globalVocabularyData && Array.isArray(window.globalVocabularyData) && window.globalVocabularyData.length > 0)
+                                                ? window.globalVocabularyData.length
+                                                : 0;
+
+                if (totalWordsInAllDaysMode === 0) {
+                    console.warn("[ranking] total words missing, skip save");
+                    return { success: false, message: "전체 단어 수가 없어 랭킹을 기록할 수 없습니다." };
+                }
+
+                // Skip if no questions were attempted.
+                if (questionsEngagedInSession === 0) {
+                    console.warn("[ranking] no questions attempted, skip save");
+                    return { success: false, message: "풀이한 문제가 없어 기록할 수 없습니다." };
+                }
+
+                const finalUserName = (userName && userName.trim() !== "") ? userName.trim() : `익명_${currentUserId.substring(0,6)}`;
+
+                try {
+                    // Refresh token to avoid 401 due to stale token
+                    if (auth.currentUser) {
+                        await auth.currentUser.getIdToken(true);
+                    }
+
+                    // Wrap the callable so we can retry once on auth/app-check race
+                    const callOnce = async () => {
+                        const finishSession = httpsCallable(functions, "finishSession");
+                        const payload = {
+                            userName: finalUserName,
+                            sessionMeta: {
+                                mode: "all",
+                                isPartial: isPartialSession
+                            },
+                            clientHint: {
+                                clientScore: scoreInSession
+                            }
+                        };
+                        return await finishSession(payload);
+                    };
+
+                    let res;
+                    try {
+                        res = await callOnce();
+                    } catch (e1) {
+                        const code = e1 && e1.code ? String(e1.code) : "";
+                        // Retry once if token race caused auth failure
+                        if (code.includes("unauthenticated") || code.includes("permission-denied")) {
+                            try {
+                                if (auth.currentUser) {
+                                    await auth.currentUser.getIdToken(true);
+                                } else {
+                                    await ensureSignedIn(auth);
+                                }
+                                res = await callOnce();
+                            } catch (e2) {
+                                throw e2;
+                            }
+                        } else {
+                            throw e1;
+                        }
+                    }
+                    const data = (res && res.data) ? res.data : {};
+                    if (data.success) {
+                        console.info("[ranking] saved", data);
+                        return { success: true, message: data.message || "랭킹에 기록되었습니다!" };
+                    } else {
+                        return { success: false, message: data.message || "서버 검증에 실패하여 기록되지 않았습니다." };
+                    }
+                } catch (error) {
+                    console.error("Error calling finishSession callable function:", error);
+                    return { success: false, message: "랭킹 기록 중 오류 발생 (서버 호출 실패)." };
+                }
+            },
+            loadAllDaysRankingsFromFirestore: async () => {
+                const rankingsListEl = document.getElementById('allDaysRankingsList');
+                if (!rankingsListEl) return;
+                rankingsListEl.innerHTML = '<li class="text-gray-500">랭킹을 불러오는 중...</li>';
+
+                try {
+                    const rankingsCollectionRef = collection(db, `artifacts/${appId}/public/data/allDaysRankings`);
+                    const q = query(
+                        rankingsCollectionRef,
+                        orderBy("score", "desc"),
+                        orderBy("completedAt", "desc"),
+                        limit(10)
+                    );
+                    const querySnapshot = await getDocs(q);
+
+                    let rankings = [];
+                    querySnapshot.forEach((doc) => {
+                        rankings.push({ id: doc.id, ...doc.data() });
+                    });
+
+                    if (rankings.length === 0) {
+                        rankingsListEl.innerHTML = '<li class="text-gray-500">아직 기록된 랭킹이 없습니다.</li>';
+                        return;
+                    }
+
+                    rankingsListEl.innerHTML = '';
+                    rankings.forEach((rank, index) => {
+                        const li = document.createElement('li');
+                        li.className = `p-3 rounded-lg flex justify-between items-center text-sm ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'} hover:bg-blue-50 transition-colors`;
+
+                        // Derive totals/percentage if missing
+                        const totalWordsAll = (Array.isArray(window.globalVocabularyData) && window.globalVocabularyData.length > 0)
+                          ? window.globalVocabularyData.length
+                          : null;
+                        const derivedTotal = (typeof rank.totalQuestions === 'number' && rank.totalQuestions > 0)
+                          ? rank.totalQuestions
+                          : (rank.mode === 'all' && typeof totalWordsAll === 'number' ? totalWordsAll : null);
+                        const derivedPct = (typeof rank.percentage === 'number')
+                          ? rank.percentage
+                          : (typeof derivedTotal === 'number' && derivedTotal > 0
+                              ? Math.round((Number(rank.score || 0) / derivedTotal) * 10000) / 100
+                              : null);
+                        const totalDisplay = (typeof derivedTotal === 'number') ? derivedTotal : '—';
+                        const pctDisplay = (typeof derivedPct === 'number') ? `${derivedPct}%` : '—';
+
+                        const date = rank.completedAt?.toDate ? rank.completedAt.toDate().toLocaleDateString('ko-KR') : '날짜 없음';
+                        const nameDisplay = rank.userName ? rank.userName.substring(0, 15) + (rank.userName.length > 15 ? "..." : "") : '익명';
+
+                        li.innerHTML = `
+                            <div class="flex items-center">
+                                <span class="font-semibold mr-3 text-blue-600 w-6 text-center">${index + 1}.</span>
+                                <span class="font-medium text-gray-700">${nameDisplay}</span>
+                                ${rank.isPartial ? `<span class="ml-2 text-xs bg-yellow-200 text-yellow-800 px-1.5 py-0.5 rounded-full">부분</span>`: ''}
+                            </div>
+                            <div class="text-right">
+                                <span class="text-green-600 font-semibold">${rank.score} / ${totalDisplay} (${pctDisplay})</span>
+                                <span class="block text-xs text-gray-500">${date}</span>
+                            </div>
+                        `;
+                        rankingsListEl.appendChild(li);
+                    });
+
+                } catch (error) {
+                    console.error("Error loading rankings:", error);
+                    rankingsListEl.innerHTML = `<li class="text-red-500">랭킹을 불러오는데 실패했습니다. 네트워크 상태 또는 Firestore 권한/인덱스를 확인하세요.</li>`;
+                }
+            }
+        };
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                window.appContext.currentUserId = user.uid;
+                await window.firebaseInstances.loadIncorrectWordsFromFirestore(); 
+                await window.firebaseInstances.loadAllDaysRankingsFromFirestore(); 
+            } else {
+                window.appContext.currentUserId = null;
+                window.appContext.currentUserName = null;
+                window.appContext.currentIncorrectWords = []; 
+                const rankingsListEl = document.getElementById('allDaysRankingsList');
+                if(rankingsListEl) rankingsListEl.innerHTML = '<li class="text-gray-500">로그인 후 랭킹을 확인할 수 있습니다.</li>';
+            }
+            if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+                window.uiUpdateFunctions.refreshAppDisplay();
+            }
+        });
+
+        async function signInUser() { 
+            let signedIn = false;
+            if (typeof initialAuthToken === 'string' && initialAuthToken.trim() !== '') {
+                try {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                    signedIn = true;
+                } catch (customTokenError) {
+                    console.warn(`[auth] custom token failed (${customTokenError.code}), fallback to anonymous`);
+                }
+            }
+
+            if (!signedIn) {
+                try {
+                    await signInAnonymously(auth);
+                    console.info("[auth] signed in anonymously");
+                } catch (anonError) {
+                    console.error("Anonymous sign-in failed:", anonError);
+                     if (anonError.code === 'auth/operation-not-allowed') {
+                        console.warn("[auth] anonymous sign-in disabled in Firebase console");
+                    }
+                }
+            }
+        }
+        signInUser();
+    </script>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        .apple-button {
+            transition: background-color 0.2s ease-in-out, transform 0.1s ease-in-out, box-shadow 0.2s ease-in-out; 
+        }
+        .apple-button:hover {
+            filter: brightness(95%);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
+        }
+        .apple-button:active {
+            transform: scale(0.98);
+            filter: brightness(90%);
+        }
+        .quiz-card {
+            background-color: #f9f9f9; 
+            border: 1px solid #e5e5e5; 
+        }
+        .summary-list {
+            max-height: 150px;
+            overflow-y: auto;
+            border: 1px solid #e0e0e0; 
+            padding: 12px; 
+            border-radius: 12px; 
+            background-color: #ffffff; 
+        }
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(0,0,0,0.3);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.05);
+            border-radius: 3px;
+        }
+        
+        .modal-overlay {
+            background-color: rgba(0, 0, 0, 0.6);
+            transition: opacity 0.3s ease-in-out;
+        }
+        .modal-content {
+            transition: transform 0.3s ease-in-out, opacity 0.3s ease-in-out;
+        }
+        .modal-hidden {
+            opacity: 0;
+            pointer-events: none; 
+        }
+        .modal-hidden .modal-content {
+            transform: scale(0.95) translateY(-20px);
+        }
+    </style>
+</head>
+<body class="bg-white text-gray-800 flex flex-col items-center justify-center min-h-screen p-4 sm:p-6 selection:bg-blue-200 selection:text-blue-900">
+
+    <div id="namePromptModal" class="modal-overlay modal-hidden fixed inset-0 overflow-y-auto h-full w-full flex items-center justify-center z-50">
+        <div class="modal-content bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-md mx-4">
+            <h3 class="text-2xl font-semibold mb-5 text-gray-800 text-center">🏆 랭킹 이름 입력 🏆</h3>
+            <p class="text-gray-600 mb-6 text-center text-sm">랭킹에 표시될 이름을 입력해주세요.<br>(1~20자, 비워두면 '익명'으로 기록됩니다)</p>
+            <input type="text" id="rankingNameInput" class="w-full p-3.5 border border-gray-300 rounded-lg mb-6 focus:ring-2 focus:ring-blue-500 transition text-lg" placeholder="이름 입력" maxlength="20">
+            <div class="flex flex-col sm:flex-row justify-end gap-3">
+                <button id="cancelRankingNameBtn" class="apple-button w-full sm:w-auto bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-3 px-5 rounded-lg">취소</button>
+                <button id="submitRankingNameBtn" class="apple-button w-full sm:w-auto bg-blue-500 text-white font-semibold py-3 px-5 rounded-lg">확인 및 기록</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="bg-white p-6 sm:p-10 rounded-2xl shadow-2xl w-full max-w-xl border border-gray-200">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl sm:text-5xl font-semibold text-gray-900">능률보카 연습</h1>
+            <p class="text-gray-500 mt-3 text-lg">DAY 49 - DAY 60</p>
+        </header>
+
+        <div id="daySelection" class="mb-8">
+            <h2 class="text-2xl font-medium mb-6 text-center text-gray-700">학습 모드 선택</h2>
+            <div class="grid grid-cols-1 gap-4 mb-6">
+                <button id="learnIncorrectBtn" class="day-btn apple-button bg-red-500 text-white font-medium py-4 px-5 rounded-xl text-lg shadow-sm disabled:opacity-60 disabled:cursor-not-allowed" data-day="incorrect" disabled>
+                    틀린 단어장 (<span id="incorrectWordCountNav">0</span>)
+                </button>
+                 <button data-day="all" class="day-btn apple-button bg-blue-500 text-white font-medium py-4 px-5 rounded-xl text-lg shadow-sm">
+                    ALL DAYs 종합 학습
+                </button>
+            </div>
+            <h3 class="text-xl font-medium mb-4 text-center text-gray-600">또는, DAY 선택:</h3>
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" id="dayButtonsContainer">
+            </div>
+
+            <div id="rankingsSection" class="mt-10 pt-6 border-t border-gray-200">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-2xl font-semibold text-gray-800">🏆 ALL DAYs 명예의 전당 🏆</h3>
+                    <button id="refreshRankingsBtn" class="apple-button bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium py-1.5 px-3 rounded-lg shadow-sm">
+                        새로고침
+                    </button>
+                </div>
+                <ul id="allDaysRankingsList" class="space-y-2 max-h-80 overflow-y-auto bg-gray-50 p-3 rounded-lg border border-gray-200">
+                    Rankings will be loaded here
+                </ul>
+            </div>
+        </div>
+
+        <div id="quizArea" class="hidden">
+            <div class="flex justify-between items-center mb-6">
+                <h2 id="currentDayTitle" class="text-3xl font-semibold text-gray-800"></h2>
+                <button id="changeDayBtn" class="apple-button bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg text-sm">모드 변경</button>
+            </div>
+            
+            <div class="quiz-card p-6 sm:p-8 rounded-xl shadow-lg mb-6">
+                <p id="progressText" class="text-sm text-gray-500 mb-3 text-right"></p>
+                <div id="sentenceContainer" class="mb-5">
+                    <p class="text-xl sm:text-2xl leading-relaxed text-gray-800" id="englishSentence"></p>
+                </div>
+                <input type="text" id="answerInput" class="w-full p-4 border border-gray-300 rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition text-lg" placeholder="정답을 입력하세요...">
+                <div id="feedback" class="mt-4 text-md font-medium h-7"></div>
+            </div>
+            <p id="koreanTranslation" class="text-gray-600 bg-gray-100 p-4 rounded-xl text-base mb-8 border border-gray-200"></p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-3">
+                <button id="checkAnswerBtn" class="apple-button w-full bg-blue-500 text-white font-semibold py-3.5 px-4 rounded-xl text-lg shadow-md">정답 확인</button>
+                <button id="nextSentenceBtn" class="apple-button w-full bg-green-500 text-white font-semibold py-3.5 px-4 rounded-xl text-lg shadow-md hidden">다음 문제</button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <button id="showHintBtn" class="apple-button w-full bg-yellow-400 hover:bg-yellow-500 text-yellow-900 font-medium py-3.5 px-4 rounded-xl text-lg shadow-md">힌트 보기</button>
+                <button id="showAnswerBtn" class="apple-button w-full bg-orange-400 hover:bg-orange-500 text-orange-900 font-medium py-3.5 px-4 rounded-xl text-lg shadow-md">정답 보기</button>
+            </div>
+        </div>
+
+        <div id="completionMessage" class="hidden text-center py-10">
+            <h2 id="completionTitle" class="text-3xl font-semibold text-green-600 mb-5">🎉 학습 완료! 🎉</h2>
+            <p id="completionSubtitle" class="text-gray-600 mb-3 text-lg"></p>
+            <p id="rankingMessage" class="text-md mt-2 mb-4"></p> 
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 text-left">
+                <div>
+                    <h3 class="text-xl font-medium text-green-700 mb-3">맞힌 단어: <span id="correctCount" class="font-semibold">0</span>개</h3>
+                    <ul id="correctWordsList" class="summary-list list-disc list-inside text-sm text-gray-700"></ul>
+                </div>
+                <div>
+                    <h3 class="text-xl font-medium text-red-600 mb-3">틀린 단어: <span id="incorrectCount" class="font-semibold">0</span>개</h3>
+                    <ul id="incorrectWordsList" class="summary-list list-disc list-inside text-sm text-gray-700"></ul>
+                </div>
+            </div>
+             <div id="incorrectWordsReviewSection" class="mt-5 mb-8 text-left hidden">
+                <h3 class="text-xl font-medium text-yellow-700 mb-3">틀린 단어장에 남은 단어: <span id="remainingIncorrectCount" class="font-semibold">0</span>개</h3>
+                <ul id="remainingIncorrectWordsList" class="summary-list list-disc list-inside text-sm text-gray-700"></ul>
+            </div>
+            <button id="tryAnotherDayBtn" class="apple-button bg-blue-500 text-white font-semibold py-3.5 px-8 rounded-xl text-lg shadow-md">다른 모드/DAY 선택</button>
+        </div>
+    </div>
+
+    <footer class="text-center mt-10 mb-6">
+        <p class="text-xs text-gray-400">Hana Academy Seoul 김우빈 제작. User ID: <span id="userIdDisplay">Not signed in</span></p>
+    </footer>
+
+    <script type="module">
+        // UI 업데이트 함수
+        window.uiUpdateFunctions = {
+            refreshAppDisplay: () => {
+                const { currentUserId, currentIncorrectWords } = window.appContext;
+                const learnIncorrectBtn = document.getElementById('learnIncorrectBtn');
+                const incorrectWordCountNavSpan = document.getElementById('incorrectWordCountNav');
+                const userIdDisplay = document.getElementById('userIdDisplay');
+
+                if (learnIncorrectBtn && incorrectWordCountNavSpan) {
+                    incorrectWordCountNavSpan.textContent = currentIncorrectWords.length;
+                    const isDisabled = !(currentIncorrectWords.length > 0 && currentUserId);
+                    learnIncorrectBtn.disabled = isDisabled;
+                    learnIncorrectBtn.classList.toggle('opacity-60', isDisabled);
+                    learnIncorrectBtn.classList.toggle('cursor-not-allowed', isDisabled);
+                }
+                if (userIdDisplay) {
+                    userIdDisplay.textContent = currentUserId ? currentUserId : "Not signed in";
+                }
+            }
+        };
+        
+        // DOM Elements
+        const daySelectionDiv = document.getElementById('daySelection');
+        const quizAreaDiv = document.getElementById('quizArea');
+        const completionMessageDiv = document.getElementById('completionMessage');
+        const currentDayTitle = document.getElementById('currentDayTitle');
+        const progressText = document.getElementById('progressText');
+        const englishSentenceP = document.getElementById('englishSentence');
+        const answerInput = document.getElementById('answerInput');
+        const feedbackP = document.getElementById('feedback');
+        const koreanTranslationP = document.getElementById('koreanTranslation');
+        const checkAnswerBtn = document.getElementById('checkAnswerBtn');
+        const nextSentenceBtn = document.getElementById('nextSentenceBtn');
+        const changeDayBtn = document.getElementById('changeDayBtn');
+        const tryAnotherDayBtn = document.getElementById('tryAnotherDayBtn');
+        const showHintBtn = document.getElementById('showHintBtn');
+        const showAnswerBtn = document.getElementById('showAnswerBtn');
+        const completionTitleElement = document.getElementById('completionTitle');
+        const completionSubtitleElement = document.getElementById('completionSubtitle');
+        const rankingMessageP = document.getElementById('rankingMessage');
+        const correctCountSpan = document.getElementById('correctCount');
+        const incorrectCountSpan = document.getElementById('incorrectCount');
+        const correctWordsUl = document.getElementById('correctWordsList');
+        const incorrectWordsUl = document.getElementById('incorrectWordsList');
+        const incorrectWordsReviewSection = document.getElementById('incorrectWordsReviewSection');
+        const remainingIncorrectCountSpan = document.getElementById('remainingIncorrectCount');
+        const remainingIncorrectWordsUl = document.getElementById('remainingIncorrectWordsList');
+        const refreshRankingsBtn = document.getElementById('refreshRankingsBtn');
+
+        const namePromptModal = document.getElementById('namePromptModal');
+        const rankingNameInput = document.getElementById('rankingNameInput');
+        const submitRankingNameBtn = document.getElementById('submitRankingNameBtn');
+        const cancelRankingNameBtn = document.getElementById('cancelRankingNameBtn');
+        
+        let namePromptResolve = null; 
+
+        let currentQuestions = []; 
+        let currentQuestionIndex = 0;
+        let selectedMode = ''; 
+        let sessionCorrectAnswers = []; 
+        let sessionIncorrectAnswers = [];
+        let quizInProgress = false;
+
+
+        function shuffleArray(array) { 
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+        }
+
+        function loadQuestion() {
+            if (currentQuestionIndex < currentQuestions.length) {
+                quizInProgress = true;
+                const question = currentQuestions[currentQuestionIndex];
+                const sentenceHTML = question.sentence_template.replace('___', 
+                    `<span class="font-semibold text-blue-600" id="blankPlaceholder">____</span>` + 
+                    `<span id="letterHint" class="text-sm text-yellow-600 ml-2 hidden"></span>`
+                );
+                englishSentenceP.innerHTML = `"${sentenceHTML}"`;
+                koreanTranslationP.textContent = question.korean_translation;
+                answerInput.value = '';
+                feedbackP.textContent = '';
+                answerInput.disabled = false;
+                
+                checkAnswerBtn.classList.remove('hidden');
+                nextSentenceBtn.classList.add('hidden');
+                showHintBtn.classList.remove('hidden');
+                showHintBtn.disabled = false;
+                showAnswerBtn.classList.remove('hidden');
+                showAnswerBtn.disabled = false;
+                document.getElementById('letterHint').classList.add('hidden');
+
+                progressText.textContent = `문제 ${currentQuestionIndex + 1} / ${currentQuestions.length}`;
+                answerInput.focus();
+            } else {
+                quizInProgress = false;
+                const questionsInThisQuizSession = currentQuestions.length;
+                displayCompletionSummary(false, questionsInThisQuizSession);
+            }
+        }
+
+        async function promptForRankingName() {
+            return new Promise((resolve) => {
+                namePromptResolve = resolve; 
+                rankingNameInput.value = window.appContext.currentUserName || ''; 
+                namePromptModal.classList.remove('modal-hidden');
+                rankingNameInput.focus();
+            });
+        }
+
+        submitRankingNameBtn.addEventListener('click', () => {
+            const name = rankingNameInput.value.trim();
+            window.appContext.currentUserName = name; 
+            if (namePromptResolve) namePromptResolve(name);
+            namePromptModal.classList.add('modal-hidden');
+            namePromptResolve = null;
+        });
+
+        cancelRankingNameBtn.addEventListener('click', () => {
+            if (namePromptResolve) namePromptResolve(null); 
+            namePromptModal.classList.add('modal-hidden');
+            namePromptResolve = null;
+        });
+
+
+        async function displayCompletionSummary(isPartialExit = false, questionsEngagedInSession = 0) {
+            quizInProgress = false;
+            quizAreaDiv.classList.add('hidden');
+            completionMessageDiv.classList.remove('hidden');
+
+            const scoreOfSession = sessionCorrectAnswers.length;
+            
+            correctCountSpan.textContent = scoreOfSession;
+            incorrectCountSpan.textContent = sessionIncorrectAnswers.length;
+
+            correctWordsUl.innerHTML = '';
+            sessionCorrectAnswers.forEach(q => { 
+                const li = document.createElement('li');
+                li.className = 'text-gray-600';
+                li.textContent = `${q.target_word}`;
+                correctWordsUl.appendChild(li);
+            });
+
+            incorrectWordsUl.innerHTML = '';
+            sessionIncorrectAnswers.forEach(item => { 
+                const li = document.createElement('li');
+                li.className = 'text-gray-600';
+                li.innerHTML = `정답: <strong class="text-red-500 font-medium">${item.question.target_word}</strong> (입력: ${item.userAnswer || '없음'})`;
+                incorrectWordsUl.appendChild(li);
+            });
+            
+            if (rankingMessageP) rankingMessageP.textContent = '';
+
+            if (selectedMode === 'incorrect') {
+                completionTitleElement.textContent = "🎉 틀린 단어 학습 완료! 🎉";
+                completionSubtitleElement.textContent = "틀린 단어장에서 맞힌 단어는 제외되었습니다.";
+                incorrectWordsReviewSection.classList.remove('hidden');
+                const { currentIncorrectWords } = window.appContext;
+                remainingIncorrectCountSpan.textContent = currentIncorrectWords.length;
+                remainingIncorrectWordsUl.innerHTML = '';
+                currentIncorrectWords.forEach(q => {
+                    const li = document.createElement('li');
+                    li.className = 'text-gray-600';
+                    li.textContent = q.target_word;
+                    remainingIncorrectWordsUl.appendChild(li);
+                });
+
+            } else {
+                completionTitleElement.textContent = isPartialExit ? "📝 중간 학습 결과 📝" : "🎉 학습 완료! 🎉";
+                completionSubtitleElement.textContent = isPartialExit ? "중간 결과가 기록됩니다." : "틀린 단어는 '틀린 단어장'에 저장되었습니다.";
+                incorrectWordsReviewSection.classList.add('hidden');
+
+                if (selectedMode === 'all' && window.firebaseInstances.saveAllDaysRankingToFirestore) {
+                    if (questionsEngagedInSession > 0) { 
+                        const userName = await promptForRankingName(); 
+                        const result = await window.firebaseInstances.saveAllDaysRankingToFirestore(userName, scoreOfSession, questionsEngagedInSession, isPartialExit);
+                        if (rankingMessageP) {
+                            rankingMessageP.textContent = result.message;
+                            rankingMessageP.className = result.success ? "text-blue-600 mt-2 mb-4 text-md" : "text-red-600 mt-2 mb-4 text-md";
+                        }
+                        if (result.success) {
+                           await window.firebaseInstances.loadAllDaysRankingsFromFirestore(); 
+                        }
+                    } else if (rankingMessageP) {
+                        rankingMessageP.textContent = "풀이한 문제가 없어 랭킹에 기록되지 않았습니다.";
+                        rankingMessageP.className = "text-yellow-600 mt-2 mb-4 text-md";
+                    }
+                }
+            }
+        }
+
+        function handleShowHint() { 
+            if (currentQuestionIndex >= currentQuestions.length) return;
+            const question = currentQuestions[currentQuestionIndex];
+            const letterHintSpan = document.getElementById('letterHint');
+            letterHintSpan.textContent = `(${question.target_word.length} 글자)`;
+            letterHintSpan.classList.remove('hidden');
+            showHintBtn.disabled = true;
+        }
+
+        async function checkAnswer() { 
+            if (currentQuestionIndex >= currentQuestions.length) return;
+            const userAnswer = answerInput.value.trim();
+            const question = currentQuestions[currentQuestionIndex];
+            const correctAnswer = question.target_word;
+
+            if (userAnswer.toLowerCase() === correctAnswer.toLowerCase()) {
+                feedbackP.textContent = '정답입니다! 👍';
+                feedbackP.className = 'mt-4 text-md font-medium h-7 text-green-600';
+                sessionCorrectAnswers.push(question);
+                if (selectedMode === 'incorrect' && window.firebaseInstances.removeIncorrectWordFromFirestoreGlobally) {
+                    await window.firebaseInstances.removeIncorrectWordFromFirestoreGlobally(question.id);
+                }
+            } else {
+                feedbackP.textContent = `오답입니다. 정답: ${correctAnswer}`;
+                feedbackP.className = 'mt-4 text-md font-medium h-7 text-red-600';
+                sessionIncorrectAnswers.push({ question: question, userAnswer: userAnswer });
+                if (selectedMode !== 'incorrect' && window.firebaseInstances.saveIncorrectWordToFirestore) {
+                    await window.firebaseInstances.saveIncorrectWordToFirestore(question);
+                }
+            }
+            answerInput.disabled = true;
+            checkAnswerBtn.classList.add('hidden');
+            nextSentenceBtn.classList.remove('hidden');
+            showHintBtn.classList.add('hidden'); 
+            showAnswerBtn.disabled = true; 
+            showAnswerBtn.classList.add('hidden');
+            nextSentenceBtn.focus(); 
+        }
+        
+        async function handleShowAnswer() { 
+            if (currentQuestionIndex >= currentQuestions.length) return;
+            const question = currentQuestions[currentQuestionIndex];
+            const correctAnswer = question.target_word;
+            feedbackP.textContent = `정답: ${correctAnswer}`;
+            feedbackP.className = 'mt-4 text-md font-medium h-7 text-blue-600';
+            answerInput.value = correctAnswer; 
+            answerInput.disabled = true;
+            
+            if (selectedMode !== 'incorrect' && window.firebaseInstances.saveIncorrectWordToFirestore) {
+                 const alreadyMarkedIncorrectInSession = sessionIncorrectAnswers.some(item => item.question.id === question.id);
+                 if (!alreadyMarkedIncorrectInSession) { 
+                    sessionIncorrectAnswers.push({ question: question, userAnswer: "(정답 보기 사용)" });
+                    await window.firebaseInstances.saveIncorrectWordToFirestore(question);
+                 }
+            }
+
+            checkAnswerBtn.classList.add('hidden');
+            nextSentenceBtn.classList.remove('hidden');
+            showHintBtn.classList.add('hidden'); 
+            showAnswerBtn.disabled = true;
+            showAnswerBtn.classList.add('hidden');
+            nextSentenceBtn.focus();
+        }
+
+        function startQuiz(mode) {
+            selectedMode = mode; 
+            sessionCorrectAnswers = []; 
+            sessionIncorrectAnswers = []; 
+            // quizInProgress is set inside loadQuestion or when exiting
+
+            const { currentIncorrectWords } = window.appContext;
+            const localVocabularyData = window.globalVocabularyData; 
+
+            if (typeof localVocabularyData === 'undefined' || !Array.isArray(localVocabularyData) || localVocabularyData.length === 0) { 
+                console.error("Error in startQuiz: globalVocabularyData is not suitable.");
+                const daySelectionMessage = document.createElement('p');
+                daySelectionMessage.textContent = "단어 데이터 로딩 오류. vocabulary.js 파일을 확인해주세요.";
+                daySelectionMessage.className = "text-red-500 text-center my-4";
+                if (!daySelectionDiv.querySelector('.text-red-500')) {
+                    daySelectionDiv.insertBefore(daySelectionMessage, daySelectionDiv.querySelector('#dayButtonsContainer'));
+                }
+                quizInProgress = false;
+                return;
+            } else {
+                const existingErrorMsg = daySelectionDiv.querySelector('.text-red-500.text-center.my-4');
+                if (existingErrorMsg) existingErrorMsg.remove();
+            }
+
+            if (mode === 'incorrect') {
+                if (currentIncorrectWords.length === 0) {
+                    feedbackP.textContent = "틀린 단어장에 학습할 단어가 없습니다.";
+                    feedbackP.className = 'mt-4 text-md font-medium h-7 text-yellow-600 text-center';
+                    daySelectionDiv.classList.remove('hidden'); 
+                    quizAreaDiv.classList.add('hidden');
+                    quizInProgress = false;
+                    return;
+                }
+                currentQuestions = [...currentIncorrectWords]; 
+                currentDayTitle.textContent = '틀린 단어장 학습';
+            } else if (mode === 'all') {
+                currentQuestions = [...localVocabularyData]; 
+                currentDayTitle.textContent = 'ALL DAYs 종합';
+            } else { 
+                currentQuestions = localVocabularyData.filter(q => q.day == mode);
+                currentDayTitle.textContent = `DAY ${mode}`;
+            }
+            
+            if (currentQuestions.length === 0 && mode !== 'incorrect') { 
+                 feedbackP.textContent = "선택한 모드에 문제가 없습니다.";
+                 feedbackP.className = 'mt-4 text-md font-medium h-7 text-yellow-600 text-center';
+                 daySelectionDiv.classList.remove('hidden'); 
+                 quizAreaDiv.classList.add('hidden');
+                 quizInProgress = false;
+                 return;
+            }
+
+            shuffleArray(currentQuestions); 
+            currentQuestionIndex = 0;
+            quizInProgress = true;
+
+            daySelectionDiv.classList.add('hidden');
+            quizAreaDiv.classList.remove('hidden');
+            completionMessageDiv.classList.add('hidden');
+            feedbackP.textContent = ''; 
+            
+            loadQuestion();
+        }
+
+        const dayButtonsContainer = document.getElementById('dayButtonsContainer');
+        if (dayButtonsContainer) { 
+            let days = [37, 38, 39, 40, 41, 42]; 
+            if (window.globalVocabularyData && Array.isArray(window.globalVocabularyData) && window.globalVocabularyData.length > 0) {
+                const uniqueDays = [...new Set(window.globalVocabularyData.map(item => item.day))].sort((a,b) => a-b);
+                if (uniqueDays.length > 0) days = uniqueDays;
+            }
+            dayButtonsContainer.innerHTML = days.map(day => 
+                `<button data-day="${day}" class="day-btn apple-button bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-3 px-4 rounded-xl text-base border border-gray-300 shadow-sm">DAY ${day}</button>`
+            ).join('');
+        }
+
+        document.getElementById('daySelection').addEventListener('click', (event) => {
+            if (event.target.matches('.day-btn')) {
+                 startQuiz(event.target.dataset.day);
+            }
+        });
+
+        checkAnswerBtn.addEventListener('click', checkAnswer);
+        answerInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter' && !checkAnswerBtn.classList.contains('hidden')) checkAnswer();
+        });
+        nextSentenceBtn.addEventListener('click', () => {
+            currentQuestionIndex++;
+            loadQuestion();
+        });
+        showHintBtn.addEventListener('click', handleShowHint);
+        showAnswerBtn.addEventListener('click', handleShowAnswer);
+        
+        async function handleReturnToSelection() { 
+            if (selectedMode === 'all' && quizInProgress && currentQuestionIndex > 0) {
+                await displayCompletionSummary(true, currentQuestionIndex); 
+            } else {
+                quizInProgress = false; 
+                daySelectionDiv.classList.remove('hidden');
+                quizAreaDiv.classList.add('hidden');
+                completionMessageDiv.classList.add('hidden');
+                feedbackP.textContent = ''; 
+                if (rankingMessageP) rankingMessageP.textContent = ''; 
+                if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+                    window.uiUpdateFunctions.refreshAppDisplay();
+                }
+                if (window.firebaseInstances && window.firebaseInstances.loadAllDaysRankingsFromFirestore) {
+                    await window.firebaseInstances.loadAllDaysRankingsFromFirestore();
+                }
+            }
+        }
+
+        changeDayBtn.addEventListener('click', handleReturnToSelection);
+        tryAnotherDayBtn.addEventListener('click', async () => { 
+            quizInProgress = false;
+            daySelectionDiv.classList.remove('hidden');
+            quizAreaDiv.classList.add('hidden');
+            completionMessageDiv.classList.add('hidden');
+            feedbackP.textContent = ''; 
+            if (rankingMessageP) rankingMessageP.textContent = ''; 
+            if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+                 window.uiUpdateFunctions.refreshAppDisplay();
+            }
+            if (window.firebaseInstances && window.firebaseInstances.loadAllDaysRankingsFromFirestore) {
+                await window.firebaseInstances.loadAllDaysRankingsFromFirestore();
+            }
+        });
+        
+        refreshRankingsBtn.addEventListener('click', async () => {
+            if (window.firebaseInstances && window.firebaseInstances.loadAllDaysRankingsFromFirestore) {
+                refreshRankingsBtn.textContent = '갱신 중...';
+                refreshRankingsBtn.disabled = true;
+                await window.firebaseInstances.loadAllDaysRankingsFromFirestore();
+                refreshRankingsBtn.textContent = '새로고침';
+                refreshRankingsBtn.disabled = false;
+            }
+        });
+        
+        if (window.uiUpdateFunctions && window.uiUpdateFunctions.refreshAppDisplay) {
+            window.uiUpdateFunctions.refreshAppDisplay();
+        }
+    </script>
+</body>
+</html>
